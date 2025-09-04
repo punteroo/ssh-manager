@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# Script to manage SSH connections to AWS instances
+
+# Get the directory of the script
+SCRIPT_DIR=$(dirname "$0")
+KEYS_DIR="$SCRIPT_DIR/keys"
+DATA_FILE="$SCRIPT_DIR/connections.txt"
+
+# Create keys directory if it doesn't exist
+mkdir -p "$KEYS_DIR"
+
+# Create data file if it doesn't exist
+touch "$DATA_FILE"
+
+# Function to list instances and connect
+connect() {
+    if [ ! -s "$DATA_FILE" ]; then
+        echo "No instances found. Add one first."
+        return
+    fi
+
+    echo "Available instances:"
+    i=1
+    declare -A instances
+    while IFS='|' read -r name desc ip user key; do
+        echo "$i) $name - $desc (IP: $ip, User: $user, Key: $key)"
+        instances[$i]="$name|$desc|$ip|$user|$key"
+        ((i++))
+    done < "$DATA_FILE"
+
+    read -p "Select instance number to connect (or q to quit): " choice
+    if [ "$choice" = "q" ]; then
+        return
+    fi
+
+    if [[ ! $choice =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -ge "$i" ]; then
+        echo "Invalid choice."
+        return
+    fi
+
+    IFS='|' read -r name desc ip user key <<< "${instances[$choice]}"
+    echo "Connecting to $name ($ip)..."
+    ssh -i "$KEYS_DIR/$key" "$user@$ip"
+}
+
+# Function to add a new instance
+add() {
+    read -p "Enter instance name: " name
+    if [ -z "$name" ]; then
+        echo "Name cannot be empty."
+        return
+    fi
+
+    read -p "Enter description (optional): " desc
+
+    read -p "Enter IP address: " ip
+    if [ -z "$ip" ]; then
+        echo "IP cannot be empty."
+        return
+    fi
+
+    read -p "Enter username (default: ubuntu): " user
+    if [ -z "$user" ]; then
+        user="ubuntu"
+    fi
+
+    read -p "Enter key file name (relative to keys/): " key
+    if [ -z "$key" ]; then
+        echo "Key file cannot be empty."
+        return
+    fi
+
+    echo "$name|$desc|$ip|$user|$key" >> "$DATA_FILE"
+    echo "Instance added."
+}
+
+# Main menu loop
+while true; do
+    echo ""
+    echo "SSH Manager"
+    echo "1) Connect to an instance"
+    echo "2) Add new instance"
+    echo "3) Quit"
+    read -p "Choose an option: " option
+
+    case $option in
+        1) connect ;;
+        2) add ;;
+        3) exit 0 ;;
+        *) echo "Invalid option." ;;
+    esac
+done
