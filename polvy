@@ -6,12 +6,23 @@
 SCRIPT_DIR=$(dirname "$0")
 KEYS_DIR="$SCRIPT_DIR/keys"
 DATA_FILE="$SCRIPT_DIR/connections.txt"
+SSH_DIR="$HOME/.ssh"
 
 # Create keys directory if it doesn't exist
 mkdir -p "$KEYS_DIR"
 
 # Create data file if it doesn't exist
 touch "$DATA_FILE"
+
+# Function to get octal permissions cross-platform
+get_permissions() {
+    local file="$1"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        stat -f '%A' "$file" 2>/dev/null
+    else
+        stat -c '%a' "$file" 2>/dev/null
+    fi
+}
 
 # Function to list instances and connect
 connect() {
@@ -40,8 +51,38 @@ connect() {
     fi
 
     IFS='|' read -r name desc ip user key <<< "${instances[$choice]}"
+    key_path="$KEYS_DIR/$key"
+
+    # Check if key exists in keys directory, otherwise try .ssh
+    if [ ! -f "$key_path" ]; then
+        echo "Key file not found in keys directory, checking $SSH_DIR..."
+        key_path="$SSH_DIR/$key"
+        if [ ! -f "$key_path" ]; then
+            echo "Key file not found: $key (checked both $KEYS_DIR and $SSH_DIR)"
+            return
+        fi
+        echo "Key file found in $SSH_DIR"
+    fi
+
+    # Check and fix permissions if too open
+    perms_oct=$(get_permissions "$key_path")
+    if [ -z "$perms_oct" ]; then
+        echo "Error getting permissions for key file."
+        return
+    fi
+    perms_dec=$((8#$perms_oct))
+    if [ $(($perms_dec & 0077)) -ne 0 ]; then
+        echo "Key permissions are too open. Fixing automatically..."
+        chmod 0600 "$key_path"
+        if [ $? -ne 0 ]; then
+            echo "Failed to fix permissions."
+            return
+        fi
+        echo "Permissions fixed."
+    fi
+
     echo "Connecting to $name ($ip)..."
-    ssh -i "$KEYS_DIR/$key" "$user@$ip"
+    ssh -i "$key_path" "$user@$ip"
 }
 
 # Function to add a new instance
@@ -65,7 +106,7 @@ add() {
         user="ubuntu"
     fi
 
-    read -p "Enter key file name (relative to keys/): " key
+    read -p "Enter key file name (relative to keys/ or ~/.ssh): " key
     if [ -z "$key" ]; then
         echo "Key file cannot be empty."
         return
