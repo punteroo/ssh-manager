@@ -4,6 +4,7 @@
 $SCRIPT_DIR = $PSScriptRoot
 $KEYS_DIR = Join-Path $SCRIPT_DIR "keys"
 $DATA_FILE = Join-Path $SCRIPT_DIR "connections.txt"
+$SSH_DIR = Join-Path $env:USERPROFILE ".ssh"
 
 # Create keys directory if it doesn't exist
 if (-not (Test-Path $KEYS_DIR)) {
@@ -54,8 +55,44 @@ function Connect-Instance {
     $ip = $parts[2]
     $user = $parts[3]
     $key = $parts[4]
+    $key_path = Join-Path $KEYS_DIR $key
+
+    # Check if key exists in keys directory, otherwise try .ssh
+    if (-not (Test-Path $key_path)) {
+        Write-Host "Key file not found in keys directory, checking $SSH_DIR..."
+        $key_path = Join-Path $SSH_DIR $key
+        if (-not (Test-Path $key_path)) {
+            Write-Host "Key file not found: $key (checked both $KEYS_DIR and $SSH_DIR)"
+            return
+        }
+        Write-Host "Key file found in $SSH_DIR"
+    }
+
+    # Check and fix permissions if too open
+    $acl = Get-Acl $key_path
+    $owner = $acl.Owner
+    $has_permissions = $acl.Access | Where-Object {
+        $_ -notmatch 'NT AUTHORITY\\SYSTEM' -and
+        $_ -notmatch $env:USERNAME -and
+        $_.FileSystemRights -match 'Read|Write|FullControl'
+    }
+    if ($has_permissions) {
+        Write-Host "Key permissions are too open. Fixing automatically..."
+        $acl = Get-Acl $key_path
+        $acl.SetAccessRuleProtection($true, $false) # Disable inheritance, remove existing rules
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($env:USERNAME, "FullControl", "Allow")
+        $acl.SetAccessRule($rule)
+        Set-Acl -Path $key_path -AclObject $acl
+        if ($?) {
+            Write-Host "Permissions fixed."
+        } else {
+            Write-Host "Failed to fix permissions."
+            return
+        }
+    }
+
     Write-Host "Connecting to $name ($ip)..."
-    ssh -i (Join-Path $KEYS_DIR $key) "$user@$ip"
+    ssh -i $key_path "$user@$ip"
 }
 
 # Function to add a new instance
@@ -79,7 +116,7 @@ function Add-Instance {
         $user = "ubuntu"
     }
 
-    $key = Read-Host "Enter key file name (relative to keys/)"
+    $key = Read-Host "Enter key file name (relative to keys/ or ~/.ssh)"
     if ([string]::IsNullOrEmpty($key)) {
         Write-Host "Key file cannot be empty."
         return
