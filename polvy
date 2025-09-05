@@ -5,11 +5,15 @@
 # Get the directory of the script
 SCRIPT_DIR=$(dirname "$0")
 KEYS_DIR="$SCRIPT_DIR/keys"
+MIGRATION_DIR="$SCRIPT_DIR/migration"
 DATA_FILE="$SCRIPT_DIR/connections.txt"
 SSH_DIR="$HOME/.ssh"
 
 # Create keys directory if it doesn't exist
 mkdir -p "$KEYS_DIR"
+
+# Create migration directory if it doesn't exist
+mkdir -p "$MIGRATION_DIR"
 
 # Create data file if it doesn't exist
 touch "$DATA_FILE"
@@ -24,8 +28,33 @@ get_permissions() {
     fi
 }
 
-# Function to list instances and connect
-connect() {
+# Function to print directory tree
+print_tree() {
+    local dir="$1"
+    local prefix="$2"
+    shopt -s nullglob dotglob
+    local files=("$dir"/*)
+    local count=${#files[@]}
+    local i=0
+    for entry in "${files[@]}"; do
+        ((i++))
+        local base=$(basename "$entry")
+        if [ $i -eq $count ]; then
+            echo "${prefix}└── $base"
+            local new_prefix="${prefix}    "
+        else
+            echo "${prefix}├── $base"
+            new_prefix="${prefix}│   "
+        fi
+        if [ -d "$entry" ]; then
+            print_tree "$entry" "$new_prefix"
+        fi
+    done
+    shopt -u nullglob dotglob
+}
+
+# Function to manage connection to a selected instance
+manage_connection() {
     if [ ! -s "$DATA_FILE" ]; then
         echo "No instances found. Add one first."
         return
@@ -40,7 +69,7 @@ connect() {
         ((i++))
     done < "$DATA_FILE"
 
-    read -p "Select instance number to connect (or q to quit): " choice
+    read -p "Select instance number (or q to quit): " choice
     if [ "$choice" = "q" ]; then
         return
     fi
@@ -81,8 +110,62 @@ connect() {
         echo "Permissions fixed."
     fi
 
-    echo "Connecting to $name ($ip)..."
-    ssh -i "$key_path" "$user@$ip"
+    # Sub-menu for connection options
+    while true; do
+        echo ""
+        echo "Connection options for $name ($ip):"
+        echo "1) Connect only"
+        echo "2) Connect and migrate files"
+        echo "3) Back"
+        read -p "Choose an option: " sub_option
+
+        case $sub_option in
+            1)
+                echo "Connecting to $name ($ip)..."
+                ssh -i "$key_path" "$user@$ip"
+                return
+                ;;
+            2)
+                # Show tree view
+                echo "Files ready for migration:"
+                print_tree "$MIGRATION_DIR" ""
+                # Check if migration dir is empty
+                if [ -z "$(ls -A "$MIGRATION_DIR")" ]; then
+                    echo "(No files in migration directory)"
+                fi
+                echo ""
+                echo "These files will be copied to $ip:/home/$user/migration"
+                read -p "Proceed with migration and connect? (y/n): " confirm
+                if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                    # Create remote directory
+                    ssh -i "$key_path" "$user@$ip" "mkdir -p /home/$user/migration"
+                    if [ $? -ne 0 ]; then
+                        echo "Failed to create remote migration directory."
+                        continue
+                    fi
+                    # Copy files
+                    scp -i "$key_path" -r "$MIGRATION_DIR/." "$user@$ip:/home/$user/migration/"
+                    if [ $? -ne 0 ]; then
+                        echo "Failed to copy files."
+                        continue
+                    fi
+                    echo "Files migrated successfully."
+                    echo "Connecting to $name ($ip)..."
+                    ssh -i "$key_path" "$user@$ip"
+                    return
+                else
+                    echo "Migration cancelled."
+                    # Back to sub-menu
+                fi
+                ;;
+            3)
+                return
+                ;;
+            *)
+                echo "Invalid option."
+                ;;
+        esac
+    done
 }
 
 # Function to add a new instance
@@ -126,7 +209,7 @@ while true; do
     read -p "Choose an option: " option
 
     case $option in
-        1) connect ;;
+        1) manage_connection ;;
         2) add ;;
         3) exit 0 ;;
         *) echo "Invalid option." ;;

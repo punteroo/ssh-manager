@@ -3,6 +3,7 @@
 # Get the directory of the script
 $SCRIPT_DIR = $PSScriptRoot
 $KEYS_DIR = Join-Path $SCRIPT_DIR "keys"
+$MIGRATION_DIR = Join-Path $SCRIPT_DIR "migration"
 $DATA_FILE = Join-Path $SCRIPT_DIR "connections.txt"
 $SSH_DIR = Join-Path $env:USERPROFILE ".ssh"
 
@@ -11,13 +12,43 @@ if (-not (Test-Path $KEYS_DIR)) {
     New-Item -ItemType Directory -Path $KEYS_DIR | Out-Null
 }
 
+# Create migration directory if it doesn't exist
+if (-not (Test-Path $MIGRATION_DIR)) {
+    New-Item -ItemType Directory -Path $MIGRATION_DIR | Out-Null
+}
+
 # Create data file if it doesn't exist
 if (-not (Test-Path $DATA_FILE)) {
     New-Item -ItemType File -Path $DATA_FILE | Out-Null
 }
 
-# Function to list instances and connect
-function Connect-Instance {
+# Function to print directory tree
+function Print-Tree {
+    param (
+        [string]$dir,
+        [string]$prefix = ""
+    )
+    $items = Get-ChildItem -Path $dir -Force
+    $count = $items.Count
+    $i = 0
+    foreach ($item in $items) {
+        $i++
+        $base = $item.Name
+        if ($i -eq $count) {
+            Write-Host "$prefix└── $base"
+            $new_prefix = "$prefix    "
+        } else {
+            Write-Host "$prefix├── $base"
+            $new_prefix = "$prefix│   "
+        }
+        if ($item.PSIsContainer) {
+            Print-Tree -dir $item.FullName -prefix $new_prefix
+        }
+    }
+}
+
+# Function to manage connection to a selected instance
+function Manage-Connection {
     $content = Get-Content $DATA_FILE
     if ($content.Count -eq 0) {
         Write-Host "No instances found. Add one first."
@@ -39,7 +70,7 @@ function Connect-Instance {
         $i++
     }
 
-    $choice = Read-Host "Select instance number to connect (or q to quit)"
+    $choice = Read-Host "Select instance number (or q to quit)"
     if ($choice -eq "q") {
         return
     }
@@ -70,13 +101,12 @@ function Connect-Instance {
 
     # Check and fix permissions if too open
     $acl = Get-Acl $key_path
-    $owner = $acl.Owner
-    $has_permissions = $acl.Access | Where-Object {
-        $_ -notmatch 'NT AUTHORITY\\SYSTEM' -and
-        $_ -notmatch $env:USERNAME -and
+    $has_extra_permissions = $acl.Access | Where-Object {
+        $_.IdentityReference -notmatch 'NT AUTHORITY\\SYSTEM' -and
+        $_.IdentityReference -notmatch $env:USERNAME -and
         $_.FileSystemRights -match 'Read|Write|FullControl'
     }
-    if ($has_permissions) {
+    if ($has_extra_permissions) {
         Write-Host "Key permissions are too open. Fixing automatically..."
         $acl = Get-Acl $key_path
         $acl.SetAccessRuleProtection($true, $false) # Disable inheritance, remove existing rules
@@ -91,8 +121,62 @@ function Connect-Instance {
         }
     }
 
-    Write-Host "Connecting to $name ($ip)..."
-    ssh -i $key_path "$user@$ip"
+    # Sub-menu for connection options
+    while ($true) {
+        Write-Host ""
+        Write-Host "Connection options for $name ($ip):"
+        Write-Host "1) Connect only"
+        Write-Host "2) Connect and migrate files"
+        Write-Host "3) Back"
+        $sub_option = Read-Host "Choose an option"
+
+        switch ($sub_option) {
+            "1" {
+                Write-Host "Connecting to $name ($ip)..."
+                ssh -i $key_path "$user@$ip"
+                return
+            }
+            "2" {
+                # Show tree view
+                Write-Host "Files ready for migration:"
+                Print-Tree -dir $MIGRATION_DIR
+                # Check if migration dir is empty
+                if ((Get-ChildItem -Path $MIGRATION_DIR -Force).Count -eq 0) {
+                    Write-Host "(No files in migration directory)"
+                }
+                Write-Host ""
+                Write-Host "These files will be copied to $ip`:/home/$user/migration"
+                $confirm = Read-Host "Proceed with migration and connect? (y/n)"
+                if ($confirm -eq "y" -or $confirm -eq "Y") {
+                    # Create remote directory
+                    ssh -i $key_path "$user@$ip" "mkdir -p /home/$user/migration"
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Host "Failed to create remote migration directory."
+                        continue
+                    }
+                    # Copy files
+                    scp -i $key_path -r (Join-Path $MIGRATION_DIR *) "$user@$ip`:/home/$user/migration/"
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Host "Failed to copy files."
+                        continue
+                    }
+                    Write-Host "Files migrated successfully."
+                    Write-Host "Connecting to $name ($ip)..."
+                    ssh -i $key_path "$user@$ip"
+                    return
+                } else {
+                    Write-Host "Migration cancelled."
+                    # Back to sub-menu
+                }
+            }
+            "3" {
+                return
+            }
+            default {
+                Write-Host "Invalid option."
+            }
+        }
+    }
 }
 
 # Function to add a new instance
@@ -136,7 +220,7 @@ while ($true) {
     $option = Read-Host "Choose an option"
 
     switch ($option) {
-        "1" { Connect-Instance }
+        "1" { Manage-Connection }
         "2" { Add-Instance }
         "3" { exit 0 }
         default { Write-Host "Invalid option." }
